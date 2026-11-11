@@ -1,0 +1,156 @@
+x-go: &go
+  build: ./go
+  image: bbs-go
+  init: true
+
+x-python: &python
+  build: ./python
+  image: bbs-python
+  init: true
+
+x-mongo: &mongo
+  image: mongo:7
+  healthcheck:
+    test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+    interval: 3s
+    timeout: 5s
+    retries: 20
+
+services:
+  broker:
+    <<: *go
+    command: ["bbs-broker"]
+
+  mongo-server-py-1:
+    <<: *mongo
+    volumes:
+      - mongo-server-py-1:/data/db
+
+  server-py-1:
+    <<: *python
+    command: ["python", "server.py"]
+    environment:
+      SERVER_NAME: server-py-1
+      MONGO_URI: mongodb://mongo-server-py-1:27017
+    depends_on:
+      broker:
+        condition: service_started
+      mongo-server-py-1:
+        condition: service_healthy
+
+  mongo-server-py-2:
+    <<: *mongo
+    volumes:
+      - mongo-server-py-2:/data/db
+
+  server-py-2:
+    <<: *python
+    command: ["python", "server.py"]
+    environment:
+      SERVER_NAME: server-py-2
+      MONGO_URI: mongodb://mongo-server-py-2:27017
+    depends_on:
+      broker:
+        condition: service_started
+      mongo-server-py-2:
+        condition: service_healthy
+
+  mongo-server-go-1:
+    <<: *mongo
+    volumes:
+      - mongo-server-go-1:/data/db
+
+  server-go-1:
+    <<: *go
+    command: ["bbs-server"]
+    environment:
+      SERVER_NAME: server-go-1
+      MONGO_URI: mongodb://mongo-server-go-1:27017
+    depends_on:
+      broker:
+        condition: service_started
+      mongo-server-go-1:
+        condition: service_healthy
+
+  mongo-server-go-2:
+    <<: *mongo
+    volumes:
+      - mongo-server-go-2:/data/db
+
+  server-go-2:
+    <<: *go
+    command: ["bbs-server"]
+    environment:
+      SERVER_NAME: server-go-2
+      MONGO_URI: mongodb://mongo-server-go-2:27017
+    depends_on:
+      broker:
+        condition: service_started
+      mongo-server-go-2:
+        condition: service_healthy
+
+  client-py-1:
+    <<: *python
+    command: ["python", "client.py"]
+    environment:
+      BOT_NAME: bot-py-1
+    depends_on:
+      server-py-1:
+        condition: service_started
+      server-py-2:
+        condition: service_started
+      server-go-1:
+        condition: service_started
+      server-go-2:
+        condition: service_started
+
+  client-py-2:
+    <<: *python
+    command: ["python", "client.py"]
+    environment:
+      BOT_NAME: bot-py-2
+    depends_on:
+      server-py-1:
+        condition: service_started
+      server-py-2:
+        condition: service_started
+      server-go-1:
+        condition: service_started
+      server-go-2:
+        condition: service_started
+
+  client-go-1:
+    <<: *go
+    command: ["bbs-client"]
+    environment:
+      BOT_NAME: bot-go-1
+    depends_on:
+      server-py-1:
+        condition: service_started
+      server-py-2:
+        condition: service_started
+      server-go-1:
+        condition: service_started
+      server-go-2:
+        condition: service_started
+
+  client-go-2:
+    <<: *go
+    command: ["bbs-client"]
+    environment:
+      BOT_NAME: bot-go-2
+    depends_on:
+      server-py-1:
+        condition: service_started
+      server-py-2:
+        condition: service_started
+      server-go-1:
+        condition: service_started
+      server-go-2:
+        condition: service_started
+
+volumes:
+  mongo-server-py-1:
+  mongo-server-py-2:
+  mongo-server-go-1:
+  mongo-server-go-2:
