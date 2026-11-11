@@ -21,6 +21,10 @@ services:
     <<: *go
     command: ["bbs-broker"]
 
+  proxy:
+    <<: *go
+    command: ["bbs-proxy"]
+
   mongo-server-py-1:
     <<: *mongo
     volumes:
@@ -34,6 +38,8 @@ services:
       MONGO_URI: mongodb://mongo-server-py-1:27017
     depends_on:
       broker:
+        condition: service_started
+      proxy:
         condition: service_started
       mongo-server-py-1:
         condition: service_healthy
@@ -52,6 +58,8 @@ services:
     depends_on:
       broker:
         condition: service_started
+      proxy:
+        condition: service_started
       mongo-server-py-2:
         condition: service_healthy
 
@@ -68,6 +76,8 @@ services:
       MONGO_URI: mongodb://mongo-server-go-1:27017
     depends_on:
       broker:
+        condition: service_started
+      proxy:
         condition: service_started
       mongo-server-go-1:
         condition: service_healthy
@@ -86,6 +96,8 @@ services:
     depends_on:
       broker:
         condition: service_started
+      proxy:
+        condition: service_started
       mongo-server-go-2:
         condition: service_healthy
 
@@ -95,6 +107,8 @@ services:
     environment:
       BOT_NAME: bot-py-1
     depends_on:
+      proxy:
+        condition: service_started
       server-py-1:
         condition: service_started
       server-py-2:
@@ -110,6 +124,8 @@ services:
     environment:
       BOT_NAME: bot-py-2
     depends_on:
+      proxy:
+        condition: service_started
       server-py-1:
         condition: service_started
       server-py-2:
@@ -125,6 +141,8 @@ services:
     environment:
       BOT_NAME: bot-go-1
     depends_on:
+      proxy:
+        condition: service_started
       server-py-1:
         condition: service_started
       server-py-2:
@@ -140,6 +158,8 @@ services:
     environment:
       BOT_NAME: bot-go-2
     depends_on:
+      proxy:
+        condition: service_started
       server-py-1:
         condition: service_started
       server-py-2:

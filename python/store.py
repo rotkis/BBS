@@ -27,6 +27,7 @@ class Store:
         db = self.client[db_name]
         self.logins = db["logins"]
         self.channels = db["channels"]
+        self.publications = db["publications"]
         self.channels.create_index("name", unique=True)
 
     def save_login(self, user, timestamp):
@@ -49,3 +50,16 @@ class Store:
         """Devolve os nomes de todos os canais em ordem alfabética."""
         cursor = self.channels.find({}, {"_id": 0, "name": 1}).sort("name", 1)
         return [doc["name"] for doc in cursor]
+
+    def save_publication(self, channel, user, text, timestamp, published_at):
+        """Guarda a publicação com o timestamp do pedido, o da publicação e o horário de gravação."""
+        self.publications.insert_one(
+            {
+                "channel": channel,
+                "user": user,
+                "text": text,
+                "timestamp": timestamp,
+                "published_at": published_at,
+                "received_at": now_ms(),
+            }
+        )

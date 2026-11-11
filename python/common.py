@@ -63,3 +63,18 @@ def show(me, direction, message):
         f"sender={message['sender']} ts={message['timestamp']} data={data}",
         flush=True,
     )
+
+
+def show_publication(me, message):
+    """Imprime uma publicação recebida com o canal, o texto, o timestamp do envio e o do recebimento."""
+    now = time.localtime()
+    received_at = now_ms()
+    clock = time.strftime("%H:%M:%S", now) + f".{received_at % 1000:03d}"
+    data = message["data"]
+    text = json.dumps(data.get("text", ""), ensure_ascii=False)
+    print(
+        f"{clock} [{me}] RECV publish  channel={data.get('channel')} "
+        f"user={data.get('user')} text={text} "
+        f"sent_at={message['timestamp']} received_at={received_at}",
+        flush=True,
+    )

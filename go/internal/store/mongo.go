@@ -13,8 +13,9 @@ import (
 )
 
 type Mongo struct {
-	logins   *mongo.Collection
-	channels *mongo.Collection
+	logins       *mongo.Collection
+	channels     *mongo.Collection
+	publications *mongo.Collection
 }
 
 // connect tenta conectar no MongoDB até ele responder, já que o container pode demorar a subir.
@@ -52,7 +53,11 @@ func NewMongo(ctx context.Context, uri, dbName string) (*Mongo, error) {
 	if _, err := channels.Indexes().CreateOne(ctx, index); err != nil {
 		return nil, err
 	}
-	return &Mongo{logins: db.Collection("logins"), channels: channels}, nil
+	return &Mongo{
+		logins:       db.Collection("logins"),
+		channels:     channels,
+		publications: db.Collection("publications"),
+	}, nil
 }
 
 // SaveLogin guarda o login com o timestamp enviado pelo bot e o horário em que o servidor recebeu.
@@ -98,4 +103,17 @@ func (m *Mongo) ListChannels(ctx context.Context) ([]string, error) {
 		names = append(names, doc.Name)
 	}
 	return names, nil
+}
+
+// SavePublication guarda a publicação com o timestamp do pedido, o da publicação e o horário de gravação.
+func (m *Mongo) SavePublication(ctx context.Context, channel, user, text string, timestamp, publishedAt int64) error {
+	_, err := m.publications.InsertOne(ctx, bson.M{
+		"channel":      channel,
+		"user":         user,
+		"text":         text,
+		"timestamp":    timestamp,
+		"published_at": publishedAt,
+		"received_at":  time.Now().UnixMilli(),
+	})
+	return err
 }

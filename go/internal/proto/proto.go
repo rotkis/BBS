@@ -16,6 +16,7 @@ type Data struct {
 	User     string   `msgpack:"user,omitempty" json:"user,omitempty"`
 	Channel  string   `msgpack:"channel,omitempty" json:"channel,omitempty"`
 	Channels []string `msgpack:"channels,omitempty" json:"channels,omitempty"`
+	Text     string   `msgpack:"text,omitempty" json:"text,omitempty"`
 	Status   string   `msgpack:"status,omitempty" json:"status,omitempty"`
 	Code     string   `msgpack:"code,omitempty" json:"code,omitempty"`
 	Message  string   `msgpack:"message,omitempty" json:"message,omitempty"`
@@ -72,4 +73,13 @@ func Show(me, direction string, message Message) {
 	fmt.Printf("%s [%s] %s %-8s sender=%s ts=%d data=%s\n",
 		time.Now().Format("15:04:05.000"), me, direction, message.Service,
 		message.Sender, message.Timestamp, data)
+}
+
+// ShowPublication imprime uma publicação recebida com o canal, o texto, o timestamp do envio e o do recebimento.
+func ShowPublication(me string, message Message) {
+	now := time.Now()
+	text, _ := json.Marshal(message.Data.Text)
+	fmt.Printf("%s [%s] RECV publish  channel=%s user=%s text=%s sent_at=%d received_at=%d\n",
+		now.Format("15:04:05.000"), me, message.Data.Channel, message.Data.User,
+		text, message.Timestamp, now.UnixMilli())
 }
