@@ -10,6 +10,7 @@ import (
 	zmq "github.com/pebbe/zmq4"
 
 	"bbs/internal/proto"
+	"bbs/internal/req"
 )
 
 const (
@@ -33,66 +34,16 @@ var messageTexts = []string{
 	"teste de publicação", "até mais",
 }
 
-type requester struct {
-	name    string
-	address string
-	socket  *zmq.Socket
-}
-
 type subscriber struct {
-	name    string
+	process *proto.Process
 	address string
 	topics  chan string
 }
 
-// connect abre um socket REQ novo, na partida e depois de cada timeout.
-func (r *requester) connect() {
-	if r.socket != nil {
-		r.socket.Close()
-	}
-	socket, err := zmq.NewSocket(zmq.REQ)
-	if err != nil {
-		log.Fatal(err)
-	}
-	socket.SetLinger(0)
-	socket.SetRcvtimeo(requestTimeout)
-	if err := socket.Connect(r.address); err != nil {
-		log.Fatal(err)
-	}
-	r.socket = socket
-}
-
-// call envia uma requisição e espera a resposta; devolve false se der timeout ou vier algo inválido.
-func (r *requester) call(service string, data proto.Data) (proto.Message, bool) {
-	request := proto.New(service, r.name, data)
-	proto.Show(r.name, "SEND", request)
-	raw, err := proto.Encode(request)
-	if err != nil {
-		log.Fatal(err)
-	}
-	if _, err := r.socket.SendBytes(raw, 0); err != nil {
-		log.Fatal(err)
-	}
-
-	rawReply, err := r.socket.RecvBytes(0)
-	if err != nil {
-		fmt.Printf("[%s] sem resposta para %s, reconectando\n", r.name, service)
-		r.connect()
-		return proto.Message{}, false
-	}
-	reply, err := proto.Decode(rawReply)
-	if err != nil {
-		fmt.Printf("[%s] resposta inválida: %v\n", r.name, err)
-		return proto.Message{}, false
-	}
-	proto.Show(r.name, "RECV", reply)
-	return reply, true
-}
-
 // login repete o login até o servidor aceitar.
-func (r *requester) login() {
+func login(r *req.Requester, name string) {
 	for {
-		reply, ok := r.call("login", proto.Data{User: r.name})
+		reply, ok := r.Call("login", proto.Data{User: name})
 		if ok && reply.Data.Status == "ok" {
 			return
 		}
@@ -101,9 +52,9 @@ func (r *requester) login() {
 }
 
 // listChannels pede a lista de canais e tenta de novo até receber.
-func (r *requester) listChannels() []string {
+func listChannels(r *req.Requester) []string {
 	for {
-		reply, ok := r.call("list", proto.Data{})
+		reply, ok := r.Call("list", proto.Data{})
 		if ok && reply.Data.Status == "ok" {
 			return reply.Data.Channels
 		}
@@ -112,10 +63,10 @@ func (r *requester) listChannels() []string {
 }
 
 // publishRound publica 10 mensagens aleatórias no canal, uma por segundo.
-func (r *requester) publishRound(channel string) {
+func publishRound(r *req.Requester, channel string) {
 	for number := 1; number <= messagesPerRound; number++ {
 		text := fmt.Sprintf("%s [%d/%d]", messageTexts[rand.Intn(len(messageTexts))], number, messagesPerRound)
-		r.call("publish", proto.Data{Channel: channel, Text: text})
+		r.Call("publish", proto.Data{Channel: channel, Text: text})
 		time.Sleep(messageInterval)
 	}
 }
@@ -152,10 +103,11 @@ func (s *subscriber) run() {
 		}
 		message, err := proto.Decode(frames[1])
 		if err != nil {
-			fmt.Printf("[%s] publicação inválida: %v\n", s.name, err)
+			fmt.Printf("[%s] publicação inválida: %v\n", s.process.Name, err)
 			continue
 		}
-		proto.ShowPublication(s.name, message)
+		s.process.Receive(message)
+		proto.ShowPublication(s.process.Name, message)
 	}
 }
 
@@ -206,19 +158,19 @@ func main() {
 		log.Fatal("BOT_NAME é obrigatório")
 	}
 
-	r := &requester{name: name, address: env("BROKER_ADDR", "tcp://broker:5555")}
-	r.connect()
-	sub := &subscriber{name: name, address: env("SUB_ADDR", "tcp://proxy:5558"), topics: make(chan string, 16)}
+	process := proto.NewProcess(name, 0)
+	r := req.New(process, env("BROKER_ADDR", "tcp://broker:5555"), requestTimeout)
+	sub := &subscriber{process: process, address: env("SUB_ADDR", "tcp://proxy:5558"), topics: make(chan string, 16)}
 	go sub.run()
 
-	r.login()
+	login(r, name)
 
 	subscribed := map[string]bool{}
 	for {
-		channels := r.listChannels()
+		channels := listChannels(r)
 		if len(channels) < minChannels {
-			r.call("channel", proto.Data{Channel: pickChannelName(channels)})
-			channels = r.listChannels()
+			r.Call("channel", proto.Data{Channel: pickChannelName(channels)})
+			channels = listChannels(r)
 		}
 
 		if len(subscribed) < minSubscriptions {
@@ -232,6 +184,6 @@ func main() {
 			time.Sleep(retryDelay)
 			continue
 		}
-		r.publishRound(channels[rand.Intn(len(channels))])
+		publishRound(r, channels[rand.Intn(len(channels))])
 	}
 }

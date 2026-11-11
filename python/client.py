@@ -25,49 +25,11 @@ MESSAGE_TEXTS = [
 ]
 
 
-class Requester:
-    def __init__(self, name, address):
-        """Guarda o nome do bot e abre o primeiro socket REQ."""
-        self.name = name
-        self.address = address
-        self.context = zmq.Context.instance()
-        self.socket = None
-        self.connect()
-
-    def connect(self):
-        """Abre um socket REQ novo, na partida e depois de cada timeout."""
-        if self.socket is not None:
-            self.socket.close(linger=0)
-        self.socket = self.context.socket(zmq.REQ)
-        self.socket.setsockopt(zmq.RCVTIMEO, REQUEST_TIMEOUT_MS)
-        self.socket.setsockopt(zmq.LINGER, 0)
-        self.socket.connect(self.address)
-
-    def call(self, service, data):
-        """Envia uma requisição e espera a resposta; devolve None se der timeout ou vier algo inválido."""
-        message = common.build(service, self.name, data)
-        common.show(self.name, "SEND", message)
-        self.socket.send(common.encode(message))
-        try:
-            raw = self.socket.recv()
-        except zmq.Again:
-            print(f"[{self.name}] sem resposta para {service}, reconectando", flush=True)
-            self.connect()
-            return None
-        try:
-            reply = common.decode(raw)
-        except ValueError as exc:
-            print(f"[{self.name}] resposta inválida: {exc}", flush=True)
-            return None
-        common.show(self.name, "RECV", reply)
-        return reply
-
-
 class Subscriber(threading.Thread):
-    def __init__(self, name, address):
+    def __init__(self, node, address):
         """Cria a thread que recebe as publicações; o socket SUB só é usado dentro dela."""
         super().__init__(daemon=True)
-        self.name_ = name
+        self.node = node
         self.address = address
         self.topics = queue.Queue()
         self.subscribed = set()
@@ -97,9 +59,10 @@ class Subscriber(threading.Thread):
             try:
                 message = common.decode(raw)
             except ValueError as exc:
-                print(f"[{self.name_}] publicação inválida: {exc}", flush=True)
+                print(f"[{self.node.name}] publicação inválida: {exc}", flush=True)
                 continue
-            common.show_publication(self.name_, message)
+            self.node.receive(message)
+            common.show_publication(self.node.name, message)
 
 
 def is_ok(reply):
@@ -109,7 +72,7 @@ def is_ok(reply):
 
 def login(requester):
     """Repete o login até o servidor aceitar."""
-    while not is_ok(requester.call("login", {"user": requester.name})):
+    while not is_ok(requester.call("login", {"user": requester.node.name})):
         time.sleep(RETRY_DELAY_S)
 
 
@@ -143,8 +106,9 @@ def main():
     name = os.environ["BOT_NAME"]
     broker = os.environ.get("BROKER_ADDR", "tcp://broker:5555")
     proxy = os.environ.get("SUB_ADDR", "tcp://proxy:5558")
-    requester = Requester(name, broker)
-    subscriber = Subscriber(name, proxy)
+    node = common.Node(name)
+    requester = common.Requester(node, broker, REQUEST_TIMEOUT_MS)
+    subscriber = Subscriber(node, proxy)
     subscriber.start()
 
     login(requester)

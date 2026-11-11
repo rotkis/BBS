@@ -8,6 +8,7 @@ COPY . .
 RUN go mod tidy \
     && go build -o /out/bbs-broker ./cmd/broker \
     && go build -o /out/bbs-proxy ./cmd/proxy \
+    && go build -o /out/bbs-reference ./cmd/reference \
     && go build -o /out/bbs-server ./cmd/server \
     && go build -o /out/bbs-client ./cmd/client
 

@@ -25,6 +25,12 @@ services:
     <<: *go
     command: ["bbs-proxy"]
 
+  reference:
+    <<: *go
+    command: ["bbs-reference"]
+    environment:
+      HEARTBEAT_TIMEOUT_S: "30"
+
   mongo-server-py-1:
     <<: *mongo
     volumes:
@@ -35,11 +41,14 @@ services:
     command: ["python", "server.py"]
     environment:
       SERVER_NAME: server-py-1
+      CLOCK_SKEW_MS: "3000"
       MONGO_URI: mongodb://mongo-server-py-1:27017
     depends_on:
       broker:
         condition: service_started
       proxy:
+        condition: service_started
+      reference:
         condition: service_started
       mongo-server-py-1:
         condition: service_healthy
@@ -54,11 +63,14 @@ services:
     command: ["python", "server.py"]
     environment:
       SERVER_NAME: server-py-2
+      CLOCK_SKEW_MS: "-2000"
       MONGO_URI: mongodb://mongo-server-py-2:27017
     depends_on:
       broker:
         condition: service_started
       proxy:
+        condition: service_started
+      reference:
         condition: service_started
       mongo-server-py-2:
         condition: service_healthy
@@ -73,11 +85,14 @@ services:
     command: ["bbs-server"]
     environment:
       SERVER_NAME: server-go-1
+      CLOCK_SKEW_MS: "1500"
       MONGO_URI: mongodb://mongo-server-go-1:27017
     depends_on:
       broker:
         condition: service_started
       proxy:
+        condition: service_started
+      reference:
         condition: service_started
       mongo-server-go-1:
         condition: service_healthy
@@ -92,11 +107,14 @@ services:
     command: ["bbs-server"]
     environment:
       SERVER_NAME: server-go-2
+      CLOCK_SKEW_MS: "-4000"
       MONGO_URI: mongodb://mongo-server-go-2:27017
     depends_on:
       broker:
         condition: service_started
       proxy:
+        condition: service_started
+      reference:
         condition: service_started
       mongo-server-go-2:
         condition: service_healthy
