@@ -1,6 +1,6 @@
 # Troca de mensagens com ZeroMQ
 
-Trabalho de Sistemas Distribuídos: um serviço de mensagens parecido com um BBS/IRC em que os usuários são bots. Este README cobre as partes 1 a 4: login, criação e listagem de canais, publicação em canais com Pub/Sub, relógios (lógico em todas as mensagens e físico nos servidores), serviço de referência e eleição de um coordenador entre os servidores.
+Trabalho de Sistemas Distribuídos: um serviço de mensagens parecido com um BBS/IRC em que os usuários são bots. Este README cobre o projeto completo, partes 1 a 5: login, criação e listagem de canais, publicação em canais com Pub/Sub, relógios (lógico em todas as mensagens e físico nos servidores), serviço de referência, eleição de um coordenador e replicação dos dados entre todos os servidores.
 
 ## Como rodar
 
@@ -23,7 +23,7 @@ As publicações aparecem nos servidores como `PUB` e nos bots inscritos como `R
 03:29:06.560 [bot-py-1] RECV publish  channel=music user=bot-go-1 text="bom dia [2/10]" sent_at=1794281346560 received_at=1794281346560
 ```
 
-Para ver só um serviço: `docker compose logs -f server-py-1`. Para zerar os dados, `docker compose down -v`.
+Para ver só um serviço: `docker compose logs -f server-py-1`. Para zerar os dados, `docker compose down -v`. Quem rodou uma versão anterior do projeto precisa fazer isso antes, porque o formato dos dados gravados mudou na parte 5.
 
 ## Estrutura
 
@@ -45,11 +45,14 @@ Pub/Sub: o proxy é um container separado do broker, com um XSUB na porta 5557 e
 
 Serialização: MessagePack. Usei mapas com chaves em texto, que são fáceis de ler nas duas linguagens e deixam adicionar campos nas próximas partes sem quebrar quem já existe.
 
-Persistência: MongoDB, uma instância por servidor, para os dados de um servidor não serem compartilhados com outro. Cada instância tem um volume, então os dados continuam depois de um `docker compose down`. O banco se chama `bbs` e tem três coleções:
+Persistência: MongoDB, uma instância por servidor, cada uma com o seu volume, então os dados continuam depois de um `docker compose down`. Nenhum arquivo ou banco é compartilhado entre servidores, mas desde a parte 5 cada servidor guarda uma cópia de tudo (ver a seção sobre replicação). O banco se chama `bbs` e tem quatro coleções:
 
-- `logins`, com `user`, `timestamp` (enviado pelo bot) e `received_at` (horário de recebimento no servidor). Todo login é gravado, inclusive os repetidos.
+- `oplog`, com o log de operações: `_id` (o número da operação), `type` (`login`, `channel` ou `publish`), `user`, `channel`, `text`, `timestamp` (do pedido do bot) e `at` (de quando o coordenador aplicou).
+- `logins`, com `user`, `timestamp` (enviado pelo bot) e `received_at` (de quando este servidor gravou). Todo login é gravado, inclusive os repetidos.
 - `channels`, com `name`, `created_by` e `timestamp`. O nome tem índice único.
-- `publications`, com `channel`, `user`, `text`, `timestamp` (do pedido do bot), `published_at` (de quando o servidor publicou) e `received_at` (de quando gravou).
+- `publications`, com `channel`, `user`, `text`, `timestamp` (do pedido do bot), `published_at` (de quando o coordenador aplicou) e `received_at` (de quando este servidor gravou).
+
+Nas três últimas o `_id` é o número da operação no `oplog`. Assim aplicar de novo uma operação que já estava gravada não duplica nada.
 
 ## Mensagens
 
@@ -61,17 +64,21 @@ Toda mensagem tem cinco campos: `service`, `sender`, `timestamp` (milissegundos 
 | `channel` | `channel` | `status` |
 | `list` | vazio | `status` e `channels` |
 | `publish` | `channel` e `text` | `status` |
+| `history` | `channel` e `limit` (opcional) | `status`, `channel`, `total` e `messages` |
 | `rank` | `name` | `status` e `rank` |
 | `heartbeat` | `name` | `status` |
 | `list` (referência) | vazio | `status` e `servers` |
 
-Entre os servidores há ainda `election`, `clock` e `time`, e o anúncio `coordinator` publicado no tópico `servers`.
+Entre os servidores há ainda `election`, `clock`, `time`, `forward`, `replicate` e `catchup`, e o anúncio `coordinator` publicado no tópico `servers`.
 
 `status` é `ok` ou `error`. Quando é `error`, a resposta também traz `code` e `message`. Os códigos usados são:
 
 - `invalid_name`: usuário ou canal fora do padrão. Os nomes aceitos têm de 1 a 32 caracteres entre letras, números, `-` e `_`.
 - `invalid_text`: texto da publicação vazio ou com mais de 500 caracteres.
 - `already_exists`: já existe um canal com esse nome.
+- `channel_not_found`: publicação em um canal que não existe.
+- `invalid_limit`: `limit` do histórico fora do intervalo de 1 a 100.
+- `no_coordinator` e `coordinator_unavailable`: o servidor não conseguiu falar com um coordenador para gravar a escrita, por exemplo durante uma eleição. O bot pode tentar de novo.
 - `unknown_service`: o `service` da requisição não existe.
 - `unknown_server`: a referência recebeu heartbeat de um nome que nunca pediu rank.
 - `bad_request`: a mensagem não é MessagePack válido ou falta algum campo obrigatório.
@@ -81,11 +88,11 @@ O servidor aceita login repetido do mesmo usuário e só grava mais um registro,
 
 ## Publicação
 
-O bot manda `publish` com o canal e o texto. O servidor grava a publicação no banco, publica no tópico do canal e só então responde `ok`. Se gravar ou publicar falhar, a resposta é um erro.
+O bot manda `publish` com o canal e o texto. O servidor manda a publicação para ser gravada e replicada (ver a seção sobre replicação), publica no tópico do canal e só então responde `ok`. Se gravar ou publicar falhar, a resposta é um erro.
 
-O que vai para o proxy é uma mensagem de duas partes: o nome do canal (o tópico) e um envelope MessagePack com `service` igual a `publish`, `sender` com o nome do servidor e `data` com `channel`, `user` (o bot que pediu) e `text`. O `timestamp` do envelope é o de quando o servidor publicou, e é o "timestamp do envio" que o bot mostra. O de recebimento é o horário em que o bot leu a mensagem.
+O que vai para o proxy é uma mensagem de duas partes: o nome do canal (o tópico) e um envelope MessagePack com `service` igual a `publish`, `sender` com o nome do servidor e `data` com `channel`, `user` (o bot que pediu) e `text`. O `timestamp` do envelope é o de quando o servidor que atendeu o bot publicou, e é o "timestamp do envio" que o bot mostra. O de recebimento é o horário em que o bot leu a mensagem.
 
-O servidor não confere se o canal existe no banco dele. Como cada servidor só conhece os canais que ele mesmo criou, essa conferência recusaria publicações em canais que existem em outro servidor.
+Quem confere se o canal existe é o coordenador, que tem todos os canais. Uma publicação em canal que não existe volta com `channel_not_found`.
 
 ## Inscrição
 
@@ -98,7 +105,8 @@ A inscrição é só do lado do bot. Ele assina o nome do canal no socket SUB, q
    1. pede a lista de canais;
    2. se existirem menos de 5, cria um com nome sorteado de uma lista fixa, preferindo um que ainda não exista, e pede a lista de novo;
    3. se estiver inscrito em menos de 3 canais, assina mais um, sorteado entre os da lista em que ainda não está;
-   4. sorteia um canal da lista e publica 10 mensagens nele, uma por segundo, com texto sorteado de uma lista fixa e o número da mensagem no final.
+   4. sorteia um canal da lista e publica 10 mensagens nele, uma por segundo, com texto sorteado de uma lista fixa e o número da mensagem no final;
+   5. pede o histórico desse canal (as 3 últimas publicações e o total), que o servidor responde com o que tem no próprio banco.
 
 Os passos 2 e 3 rodam a cada volta, e não só quando o bot conecta, para o bot chegar a 5 canais e 3 inscrições mesmo quando um pedido cai num servidor que não tem os canais dos outros.
 
@@ -140,11 +148,38 @@ A cada 15 mensagens trocadas (enviadas ou recebidas, de qualquer tipo) o servido
 
 Como o Berkeley usa a média dos relógios, os servidores se acertam entre si, mas não com a hora real. Com os desvios simulados do compose (`CLOCK_SKEW_MS`) eles convergem para a média deles e ficam a poucos milissegundos uns dos outros. Os bots não sincronizam o relógio.
 
+## Replicação
+
+Método escolhido: réplica ativa, que na aula é a propagação da operação de atualização entre as réplicas, e não a cópia dos dados. A propagação é por push, iniciada pelo servidor que tem a operação, e quem fica para trás recupera por pull.
+
+O problema do projeto é que o broker reparte as requisições em round-robin, então cada servidor só tinha as mensagens que atendeu. Para todos terem tudo, toda escrita (login, criação de canal e publicação) vira uma operação que passa por todos os servidores, na mesma ordem.
+
+Como funciona:
+
+1. O servidor que recebe a requisição do bot valida e manda a operação para o coordenador eleito na parte 4. Se ele mesmo for o coordenador, executa direto. Para isso existe o serviço `forward`.
+2. O coordenador confere as regras (canal duplicado, canal inexistente), dá à operação o próximo número da sequência, grava no `oplog` e nas coleções, e manda a operação a todos os outros servidores ativos com `replicate`. Ele só responde ao servidor de origem depois disso, e o bot só recebe `ok` depois que a operação está em todos os servidores que responderam.
+3. Quem recebe `replicate` aplica a operação se o número for o seguinte ao último que tem. Se já tinha, ignora. Se falta alguma antes, responde `gap` com o último número que tem, e o coordenador reenvia as que faltam em um lote.
+4. Leituras (`list` e `history`) são respondidas por qualquer servidor com o que tem no próprio banco.
+
+Servidor que entra ou volta: ao saber quem é o coordenador, ele pede com `catchup` tudo o que tem número maior que o último dele, em lotes de 200 (é o pull da aula). Um servidor que sobe com o banco vazio fica igual aos outros assim. Um coordenador recém-eleito faz o mesmo com todos os outros servidores antes de assumir, para não numerar operações em cima de um log incompleto.
+
+Consistência: como só o coordenador numera e todos aplicam na ordem dos números, todos os servidores veem as escritas na mesma ordem, o que dá consistência sequencial. Servidores que não respondem dentro de 1 segundo são pulados por 10 segundos e se recuperam pelo `gap` ou pelo `catchup`, então eles ficam atrasados por um tempo e depois alcançam os outros.
+
+Mudanças em relação ao método da aula:
+
+- Na réplica ativa pura cada réplica executa a operação por conta própria, mas aqui duas requisições chegam a servidores diferentes em ordens diferentes e canais com o mesmo nome seriam criados duas vezes. Por isso o coordenador da parte 4 também é quem numera as operações, e as réplicas só aplicam.
+- O servidor que atende o bot não grava a operação antes do coordenador. Ele só publica a mensagem no tópico do canal depois do `ok`.
+- O push sozinho não cobre servidor que estava fora do ar, então acrescentei o `catchup` por pull.
+
+O coordenador aplica uma operação por vez, com um lock. Cada servidor atende os pedidos dos outros em 8 threads (goroutines no Go) atrás de um ROUTER, porque o `forward` fica esperando a replicação terminar e travaria os outros pedidos se houvesse uma thread só.
+
 ## O que ainda não está resolvido
 
-Cada servidor só enxerga o que gravou. Como o broker distribui as requisições entre os 4 servidores, bots diferentes podem receber listas de canais diferentes, e o mesmo nome de canal pode ser criado uma vez em cada servidor. Isso aparece nos logs como erros `already_exists` de vez em quando. Isso vem direto da regra de não compartilhar os dados entre servidores, e a replicação entre eles não está nesta parte.
+Durante a eleição, ou logo depois de o coordenador cair, as escritas voltam com `no_coordinator` ou `coordinator_unavailable` até o novo coordenador ser anunciado. O bot só tenta de novo na rodada seguinte.
 
-O Pub/Sub não guarda nem reentrega nada. Um bot só recebe o que for publicado depois de ele assinar o canal, e um bot que entra depois não vê o que já foi publicado. Cada servidor grava as publicações que ele mesmo recebeu por requisição, então o histórico de um canal fica espalhado pelos bancos dos servidores que atenderam os pedidos.
+Se o coordenador numerar uma operação e cair antes de enviá-la a todos, essa operação pode existir só em alguns servidores. O bot não recebeu `ok` nesse caso, e o novo coordenador junta o que os outros têm antes de assumir, mas se dois servidores se acharem coordenadores ao mesmo tempo, por exemplo no começo da eleição em cascata, eles podem numerar operações diferentes com o mesmo número e uma delas é descartada em quem já tinha aplicado a outra. Não tratei esse caso.
+
+O Pub/Sub não guarda nem reentrega nada. Um bot só recebe o que for publicado depois de ele assinar o canal, e um bot que entra depois não vê o que já foi publicado, mas pode pedir o histórico com `history`.
 
 O heartbeat é por número de requisições, não por tempo. Se nenhum bot estiver mandando requisições, os servidores não mandam heartbeat e a referência os tira da lista depois do timeout. Com os 4 bots do compose cada servidor recebe uma requisição por segundo ou mais e o timeout de 30 segundos não é atingido.
 

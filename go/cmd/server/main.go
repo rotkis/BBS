@@ -81,9 +81,7 @@ func (s *server) heartbeat() {
 	reply, ok = s.reference.Call("list", proto.Data{})
 	if ok && reply.Data.Status == "ok" {
 		s.servers = reply.Data.Servers
-		s.cluster.mu.Lock()
-		s.cluster.servers = s.servers
-		s.cluster.mu.Unlock()
+		s.cluster.updateServers(s.servers)
 		names := make([]string, 0, len(s.servers))
 		for _, info := range s.servers {
 			names = append(names, info.Name+"(rank "+strconv.Itoa(info.Rank)+")")
@@ -101,32 +99,23 @@ func (s *server) afterRequest() {
 	s.cluster.afterRequest()
 }
 
-// handleLogin registra o login do bot, recusando nomes fora do padrão.
+// handleLogin valida o nome e manda o login para ser gravado e replicado.
 func (s *server) handleLogin(ctx context.Context, request proto.Message) (proto.Data, error) {
 	user := request.Data.User
 	if !proto.ValidName(user) {
 		return errorData("invalid_name", "usuário deve ter de 1 a 32 caracteres entre letras, números, - e _"), nil
 	}
-	if err := s.store.SaveLogin(ctx, user, request.Timestamp); err != nil {
-		return proto.Data{}, err
-	}
-	return proto.Data{Status: "ok"}, nil
+	return s.cluster.write(ctx, proto.Op{Type: "login", User: user, Timestamp: request.Timestamp}), nil
 }
 
-// handleChannel cria um canal novo, recusando nomes inválidos e repetidos.
+// handleChannel valida o nome e manda a criação do canal para ser gravada e replicada.
 func (s *server) handleChannel(ctx context.Context, request proto.Message) (proto.Data, error) {
 	name := request.Data.Channel
 	if !proto.ValidName(name) {
 		return errorData("invalid_name", "canal deve ter de 1 a 32 caracteres entre letras, números, - e _"), nil
 	}
-	created, err := s.store.CreateChannel(ctx, name, request.Sender, request.Timestamp)
-	if err != nil {
-		return proto.Data{}, err
-	}
-	if !created {
-		return errorData("already_exists", fmt.Sprintf("o canal %s já existe", name)), nil
-	}
-	return proto.Data{Status: "ok"}, nil
+	op := proto.Op{Type: "channel", User: request.Sender, Channel: name, Timestamp: request.Timestamp}
+	return s.cluster.write(ctx, op), nil
 }
 
 // handleList devolve a lista com o nome de todos os canais.
@@ -138,7 +127,27 @@ func (s *server) handleList(ctx context.Context, request proto.Message) (proto.D
 	return proto.Data{Status: "ok", Channels: channels}, nil
 }
 
-// handlePublish grava a publicação, publica no tópico do canal e devolve o status.
+// handleHistory devolve o total de publicações do canal e as últimas que este servidor tem.
+func (s *server) handleHistory(ctx context.Context, request proto.Message) (proto.Data, error) {
+	channel := request.Data.Channel
+	limit := request.Data.Limit
+	if limit == 0 {
+		limit = 20
+	}
+	if !proto.ValidName(channel) {
+		return errorData("invalid_name", "canal deve ter de 1 a 32 caracteres entre letras, números, - e _"), nil
+	}
+	if limit < 1 || limit > maxHistoryLimit {
+		return errorData("invalid_limit", fmt.Sprintf("limit deve ficar entre 1 e %d", maxHistoryLimit)), nil
+	}
+	total, entries, err := s.store.History(ctx, channel, limit)
+	if err != nil {
+		return proto.Data{}, err
+	}
+	return proto.Data{Status: "ok", Channel: channel, Total: total, Messages: entries}, nil
+}
+
+// handlePublish valida a publicação, manda gravar e replicar e, se deu certo, publica no tópico do canal.
 func (s *server) handlePublish(ctx context.Context, request proto.Message) (proto.Data, error) {
 	channel := request.Data.Channel
 	text := request.Data.Text
@@ -149,14 +158,15 @@ func (s *server) handlePublish(ctx context.Context, request proto.Message) (prot
 		return errorData("invalid_text", fmt.Sprintf("o texto deve ter de 1 a %d caracteres", maxTextLength)), nil
 	}
 
-	message := s.process.New("publish", proto.Data{Channel: channel, User: request.Sender, Text: text})
-	if err := s.store.SavePublication(ctx, channel, request.Sender, text, request.Timestamp, message.Timestamp); err != nil {
-		return proto.Data{}, err
+	op := proto.Op{Type: "publish", User: request.Sender, Channel: channel, Text: text, Timestamp: request.Timestamp}
+	result := s.cluster.write(ctx, op)
+	if result.Status == "ok" {
+		message := s.process.New("publish", proto.Data{Channel: channel, User: request.Sender, Text: text})
+		if err := s.publisher.Publish(channel, message); err != nil {
+			return proto.Data{}, err
+		}
 	}
-	if err := s.publisher.Publish(channel, message); err != nil {
-		return proto.Data{}, err
-	}
-	return proto.Data{Status: "ok"}, nil
+	return result, nil
 }
 
 // handle trata uma requisição e devolve a resposta já serializada.
@@ -178,6 +188,8 @@ func (s *server) handle(ctx context.Context, raw []byte) []byte {
 		data, err = s.handleList(ctx, request)
 	case "publish":
 		data, err = s.handlePublish(ctx, request)
+	case "history":
+		data, err = s.handleHistory(ctx, request)
 	default:
 		data = errorData("unknown_service", fmt.Sprintf("serviço %s não existe", request.Service))
 	}
@@ -234,6 +246,7 @@ func main() {
 		process:      process,
 		reference:    reference,
 		publisher:    publisher,
+		store:        st,
 		peerTemplate: env("PEER_ADDR", "tcp://%s:6000"),
 		peerBind:     env("PEER_BIND", "tcp://*:6000"),
 		subAddr:      env("SUB_ADDR", "tcp://proxy:5558"),

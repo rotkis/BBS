@@ -9,6 +9,7 @@ from cluster import Cluster
 from store import Store
 
 MAX_TEXT_LENGTH = 500
+MAX_HISTORY = 100
 HEARTBEAT_EVERY = 10
 REFERENCE_TIMEOUT_MS = 2000
 RETRY_DELAY_S = 2
@@ -35,6 +36,7 @@ class Server:
             "channel": self.handle_channel,
             "list": self.handle_list,
             "publish": self.handle_publish,
+            "history": self.handle_history,
         }
 
     def register(self):
@@ -63,7 +65,7 @@ class Server:
         reply = self.reference.call("list", {})
         if reply is not None and reply["data"].get("status") == "ok":
             self.servers = reply["data"].get("servers", [])
-            self.cluster.servers = self.servers
+            self.cluster.update_servers(self.servers)
             names = ", ".join(f"{s['name']}(rank {s['rank']})" for s in self.servers)
             print(f"[{self.node.name}] servidores ativos: {names}", flush=True)
 
@@ -75,28 +77,38 @@ class Server:
         self.cluster.after_request()
 
     def handle_login(self, request):
-        """Registra o login do bot, recusando nomes fora do padrão."""
+        """Valida o nome e manda o login para ser gravado e replicado."""
         user = request["data"].get("user")
         if not common.valid_name(user):
             return make_error("invalid_name", "usuário deve ter de 1 a 32 caracteres entre letras, números, - e _")
-        self.store.save_login(user, request["timestamp"])
-        return {"status": "ok"}
+        return self.cluster.write({"type": "login", "user": user, "timestamp": request["timestamp"]})
 
     def handle_channel(self, request):
-        """Cria um canal novo, recusando nomes inválidos e repetidos."""
+        """Valida o nome e manda a criação do canal para ser gravada e replicada."""
         name = request["data"].get("channel")
         if not common.valid_name(name):
             return make_error("invalid_name", "canal deve ter de 1 a 32 caracteres entre letras, números, - e _")
-        if not self.store.create_channel(name, request["sender"], request["timestamp"]):
-            return make_error("already_exists", f"o canal {name} já existe")
-        return {"status": "ok"}
+        return self.cluster.write(
+            {"type": "channel", "user": request["sender"], "channel": name, "timestamp": request["timestamp"]}
+        )
 
     def handle_list(self, request):
         """Devolve a lista com o nome de todos os canais."""
         return {"status": "ok", "channels": self.store.list_channels()}
 
+    def handle_history(self, request):
+        """Devolve o total de publicações do canal e as últimas que este servidor tem."""
+        channel = request["data"].get("channel")
+        limit = request["data"].get("limit", 20)
+        if not common.valid_name(channel):
+            return make_error("invalid_name", "canal deve ter de 1 a 32 caracteres entre letras, números, - e _")
+        if not isinstance(limit, int) or not 1 <= limit <= MAX_HISTORY:
+            return make_error("invalid_limit", f"limit deve ficar entre 1 e {MAX_HISTORY}")
+        total, messages = self.store.history(channel, limit)
+        return {"status": "ok", "channel": channel, "total": total, "messages": messages}
+
     def handle_publish(self, request):
-        """Grava a publicação, publica no tópico do canal e devolve o status."""
+        """Valida a publicação, manda gravar e replicar e, se deu certo, publica no tópico do canal."""
         channel = request["data"].get("channel")
         text = request["data"].get("text")
         if not common.valid_name(channel):
@@ -104,14 +116,19 @@ class Server:
         if not isinstance(text, str) or not text.strip() or len(text) > MAX_TEXT_LENGTH:
             return make_error("invalid_text", f"o texto deve ter de 1 a {MAX_TEXT_LENGTH} caracteres")
 
-        message = self.node.build(
-            "publish", {"channel": channel, "user": request["sender"], "text": text}
+        result = self.cluster.write(
+            {
+                "type": "publish",
+                "channel": channel,
+                "user": request["sender"],
+                "text": text,
+                "timestamp": request["timestamp"],
+            }
         )
-        self.store.save_publication(
-            channel, request["sender"], text, request["timestamp"], message["timestamp"]
-        )
-        self.publisher.publish(channel, message)
-        return {"status": "ok"}
+        if result.get("status") == "ok":
+            message = self.node.build("publish", {"channel": channel, "user": request["sender"], "text": text})
+            self.publisher.publish(channel, message)
+        return result
 
     def process(self, raw):
         """Trata uma requisição e devolve a resposta já serializada."""
@@ -158,7 +175,7 @@ def main():
     pub_socket = context.socket(zmq.PUB)
     pub_socket.connect(proxy)
     publisher = common.Publisher(pub_socket)
-    cluster = Cluster(node, reference, publisher, peer_template, peer_bind, sub_addr)
+    cluster = Cluster(node, reference, publisher, store, peer_template, peer_bind, sub_addr)
     cluster.start()
     server = Server(node, store, publisher, reference, cluster)
     server.register()

@@ -13,6 +13,7 @@ RETRY_DELAY_S = 2
 MIN_CHANNELS = 5
 MIN_SUBSCRIPTIONS = 3
 MESSAGES_PER_ROUND = 10
+HISTORY_LIMIT = 3
 MESSAGE_INTERVAL_S = 1
 CHANNEL_WORDS = [
     "general", "random", "music", "games", "news",
@@ -102,7 +103,7 @@ def publish_round(requester, channel):
 
 
 def main():
-    """Faz login e, em loop, completa canais e inscrições e publica 10 mensagens em um canal sorteado."""
+    """Faz login e, em loop, completa canais e inscrições, publica 10 mensagens em um canal sorteado e pede o histórico dele."""
     name = os.environ["BOT_NAME"]
     broker = os.environ.get("BROKER_ADDR", "tcp://broker:5555")
     proxy = os.environ.get("SUB_ADDR", "tcp://proxy:5558")
@@ -130,7 +131,9 @@ def main():
         if not channels:
             time.sleep(RETRY_DELAY_S)
             continue
-        publish_round(requester, random.choice(channels))
+        channel = random.choice(channels)
+        publish_round(requester, channel)
+        requester.call("history", {"channel": channel, "limit": HISTORY_LIMIT})
 
 
 if __name__ == "__main__":

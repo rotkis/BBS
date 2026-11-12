@@ -18,6 +18,23 @@ type ServerInfo struct {
 	Rank int    `msgpack:"rank" json:"rank"`
 }
 
+type Op struct {
+	Seq       int64  `msgpack:"seq,omitempty" json:"seq,omitempty"`
+	Type      string `msgpack:"type" json:"type"`
+	User      string `msgpack:"user,omitempty" json:"user,omitempty"`
+	Channel   string `msgpack:"channel,omitempty" json:"channel,omitempty"`
+	Text      string `msgpack:"text,omitempty" json:"text,omitempty"`
+	Timestamp int64  `msgpack:"timestamp" json:"timestamp"`
+	At        int64  `msgpack:"at,omitempty" json:"at,omitempty"`
+}
+
+type Entry struct {
+	Seq       int64  `msgpack:"seq" json:"seq"`
+	User      string `msgpack:"user" json:"user"`
+	Text      string `msgpack:"text" json:"text"`
+	Timestamp int64  `msgpack:"timestamp" json:"timestamp"`
+}
+
 type Data struct {
 	User        string       `msgpack:"user,omitempty" json:"user,omitempty"`
 	Channel     string       `msgpack:"channel,omitempty" json:"channel,omitempty"`
@@ -32,6 +49,12 @@ type Data struct {
 	Elapsed     int64        `msgpack:"elapsed,omitempty" json:"elapsed,omitempty"`
 	Servers     []ServerInfo `msgpack:"servers,omitempty" json:"servers,omitempty"`
 	Coordinator string       `msgpack:"coordinator,omitempty" json:"coordinator,omitempty"`
+	Ops         []Op         `msgpack:"ops,omitempty" json:"ops,omitempty"`
+	After       int64        `msgpack:"after,omitempty" json:"after,omitempty"`
+	Last        int64        `msgpack:"last,omitempty" json:"last,omitempty"`
+	Limit       int          `msgpack:"limit,omitempty" json:"limit,omitempty"`
+	Total       int64        `msgpack:"total,omitempty" json:"total,omitempty"`
+	Messages    []Entry      `msgpack:"messages,omitempty" json:"messages,omitempty"`
 }
 
 type Message struct {

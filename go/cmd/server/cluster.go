@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
@@ -9,6 +10,7 @@ import (
 
 	"bbs/internal/proto"
 	"bbs/internal/req"
+	"bbs/internal/store"
 )
 
 const (
@@ -18,12 +20,14 @@ const (
 	syncEvery       = 15
 	serversTopic    = "servers"
 	downFor         = 10 * time.Second
+	peerWorkers     = 8
 )
 
 type cluster struct {
 	process      *proto.Process
 	reference    *req.Requester
 	publisher    *req.Publisher
+	store        store.Store
 	peerTemplate string
 	peerBind     string
 	subAddr      string
@@ -32,8 +36,10 @@ type cluster struct {
 	rank        int
 	coordinator string
 	servers     []proto.ServerInfo
+	serversAt   time.Time
 	downUntil   map[string]time.Time
 
+	opMu       sync.Mutex
 	electionMu sync.Mutex
 	syncMu     sync.Mutex
 	nextSync   int64
@@ -83,6 +89,7 @@ func (c *cluster) fetchServers() []proto.ServerInfo {
 	defer c.mu.Unlock()
 	if ok && reply.Data.Status == "ok" {
 		c.servers = reply.Data.Servers
+		c.serversAt = time.Now()
 	}
 	return append([]proto.ServerInfo(nil), c.servers...)
 }
@@ -113,8 +120,13 @@ func (c *cluster) elect() {
 	c.becomeCoordinator()
 }
 
-// becomeCoordinator assume como coordenador, avisa os outros no tópico servers e acerta o relógio de todos.
+// becomeCoordinator busca com os outros servidores o que falta no próprio log, assume como coordenador, avisa os outros no tópico servers e acerta o relógio de todos.
 func (c *cluster) becomeCoordinator() {
+	for _, server := range c.fetchServers() {
+		if server.Name != c.process.Name && !c.isDown(server.Name) {
+			c.catchUp(context.Background(), server.Name)
+		}
+	}
 	c.setCoordinator(c.process.Name)
 	rank := c.getRank()
 	fmt.Printf("[%s] eleito coordenador (rank %d)\n", c.process.Name, rank)
@@ -238,6 +250,12 @@ func (c *cluster) handlePeer(raw []byte) []byte {
 			data = c.handleClock()
 		case "time":
 			data = proto.Data{Status: "ok", Time: c.process.Now()}
+		case "forward":
+			data = c.handleForward(context.Background(), request)
+		case "replicate":
+			data = c.handleReplicate(context.Background(), request)
+		case "catchup":
+			data = c.handleCatchup(context.Background(), request)
 		default:
 			data = errorData("unknown_service", fmt.Sprintf("serviço %s não existe", service))
 		}
@@ -251,13 +269,35 @@ func (c *cluster) handlePeer(raw []byte) []byte {
 	return encoded
 }
 
-// servePeers atende em loop as requisições dos outros servidores.
+// servePeers recebe as requisições dos outros servidores em um ROUTER e reparte entre as goroutines de trabalho, para um pedido demorado não travar os demais.
 func (c *cluster) servePeers() {
+	frontend, err := zmq.NewSocket(zmq.ROUTER)
+	if err != nil {
+		panic(err)
+	}
+	if err := frontend.Bind(c.peerBind); err != nil {
+		panic(err)
+	}
+	backend, err := zmq.NewSocket(zmq.DEALER)
+	if err != nil {
+		panic(err)
+	}
+	if err := backend.Bind("inproc://peers"); err != nil {
+		panic(err)
+	}
+	for i := 0; i < peerWorkers; i++ {
+		go c.peerWorker()
+	}
+	panic(zmq.Proxy(frontend, backend, nil))
+}
+
+// peerWorker atende requisições de outros servidores, uma por vez, em um socket REP próprio.
+func (c *cluster) peerWorker() {
 	socket, err := zmq.NewSocket(zmq.REP)
 	if err != nil {
 		panic(err)
 	}
-	if err := socket.Bind(c.peerBind); err != nil {
+	if err := socket.Connect("inproc://peers"); err != nil {
 		panic(err)
 	}
 	for {
@@ -302,5 +342,6 @@ func (c *cluster) listenAnnouncements() {
 		c.setCoordinator(message.Data.Coordinator)
 		fmt.Printf("[%s] coordenador agora é %s\n", c.process.Name, message.Data.Coordinator)
 		c.syncClock()
+		c.catchUp(context.Background(), message.Data.Coordinator)
 	}
 }

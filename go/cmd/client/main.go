@@ -20,6 +20,7 @@ const (
 	minChannels       = 5
 	minSubscriptions  = 3
 	messagesPerRound  = 10
+	historyLimit      = 3
 	subscriberTimeout = 100 * time.Millisecond
 )
 
@@ -151,7 +152,7 @@ func env(key, fallback string) string {
 	return fallback
 }
 
-// main faz login e, em loop, completa canais e inscrições e publica 10 mensagens em um canal sorteado.
+// main faz login e, em loop, completa canais e inscrições, publica 10 mensagens em um canal sorteado e pede o histórico dele.
 func main() {
 	name := os.Getenv("BOT_NAME")
 	if name == "" {
@@ -184,6 +185,8 @@ func main() {
 			time.Sleep(retryDelay)
 			continue
 		}
-		publishRound(r, channels[rand.Intn(len(channels))])
+		channel := channels[rand.Intn(len(channels))]
+		publishRound(r, channel)
+		r.Call("history", proto.Data{Channel: channel, Limit: historyLimit})
 	}
 }
