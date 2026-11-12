@@ -26,6 +26,7 @@ class Node:
         self.skew_ms = skew_ms
         self.offset_ms = 0
         self.logical = 0
+        self.exchanged = 0
         self.lock = threading.Lock()
 
     def raw_now(self):
@@ -40,17 +41,23 @@ class Node:
         """Incrementa o contador lógico antes de um envio e devolve o novo valor."""
         with self.lock:
             self.logical += 1
+            self.exchanged += 1
             return self.logical
 
     def receive(self, message):
         """Atualiza o contador lógico para o maior valor entre o próprio e o da mensagem recebida."""
         with self.lock:
             self.logical = max(self.logical, message["clock"])
+            self.exchanged += 1
 
-    def adjust(self, reference_time, t0, t1):
-        """Ajusta o relógio físico pelo algoritmo de Cristian e devolve o deslocamento e o RTT em ms."""
+    def shift(self, delta_ms):
+        """Soma delta ao deslocamento do relógio físico."""
+        self.offset_ms += delta_ms
+
+    def adjust(self, reply_time, elapsed, t0, t1):
+        """Ajusta o relógio físico à hora devolvida pelo coordenador, descontando metade do RTT sem o tempo que ele levou para responder; devolve o deslocamento e o RTT em ms."""
         rtt = t1 - t0
-        self.offset_ms = reference_time + rtt // 2 - t1
+        self.offset_ms = reply_time + (rtt - elapsed) // 2 - t1
         return self.offset_ms, rtt
 
     def build(self, service, data):
@@ -125,6 +132,7 @@ class Requester:
         self.node = node
         self.address = address
         self.timeout_ms = timeout_ms
+        self.lock = threading.Lock()
         self.context = zmq.Context.instance()
         self.socket = None
         self.connect()
@@ -140,6 +148,11 @@ class Requester:
 
     def call(self, service, data):
         """Envia uma requisição e espera a resposta; devolve None se der timeout ou vier algo inválido."""
+        with self.lock:
+            return self.call_locked(service, data)
+
+    def call_locked(self, service, data):
+        """Faz a requisição de fato; só roda com o lock do socket já adquirido."""
         message = self.node.build(service, data)
         show(self.node.name, "SEND", message)
         self.socket.send(encode(message))
@@ -157,3 +170,43 @@ class Requester:
         self.node.receive(reply)
         show(self.node.name, "RECV", reply)
         return reply
+
+
+class Publisher:
+    def __init__(self, socket):
+        """Guarda o socket PUB e o lock que deixa só uma thread publicar por vez."""
+        self.socket = socket
+        self.lock = threading.Lock()
+
+    def publish(self, topic, message):
+        """Publica a mensagem no tópico e mostra na tela."""
+        with self.lock:
+            self.socket.send_multipart([topic.encode(), encode(message)])
+        show(message["sender"], "PUB ", message)
+
+
+def call_once(node, address, timeout_ms, service, data):
+    """Faz uma requisição com um socket REQ novo, usado para falar com outros servidores; devolve None se der timeout."""
+    message = node.build(service, data)
+    show(node.name, "SEND", message)
+    socket = zmq.Context.instance().socket(zmq.REQ)
+    socket.setsockopt(zmq.LINGER, 0)
+    socket.setsockopt(zmq.RCVTIMEO, timeout_ms)
+    socket.setsockopt(zmq.SNDTIMEO, timeout_ms)
+    try:
+        socket.connect(address)
+        socket.send(encode(message))
+        raw = socket.recv()
+    except zmq.ZMQError:
+        print(f"[{node.name}] sem resposta de {address} para {service}", flush=True)
+        return None
+    finally:
+        socket.close(linger=0)
+    try:
+        reply = decode(raw)
+    except ValueError as exc:
+        print(f"[{node.name}] resposta inválida: {exc}", flush=True)
+        return None
+    node.receive(reply)
+    show(node.name, "RECV", reply)
+    return reply

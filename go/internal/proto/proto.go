@@ -19,17 +19,19 @@ type ServerInfo struct {
 }
 
 type Data struct {
-	User     string       `msgpack:"user,omitempty" json:"user,omitempty"`
-	Channel  string       `msgpack:"channel,omitempty" json:"channel,omitempty"`
-	Channels []string     `msgpack:"channels,omitempty" json:"channels,omitempty"`
-	Text     string       `msgpack:"text,omitempty" json:"text,omitempty"`
-	Status   string       `msgpack:"status,omitempty" json:"status,omitempty"`
-	Code     string       `msgpack:"code,omitempty" json:"code,omitempty"`
-	Message  string       `msgpack:"message,omitempty" json:"message,omitempty"`
-	Name     string       `msgpack:"name,omitempty" json:"name,omitempty"`
-	Rank     int          `msgpack:"rank,omitempty" json:"rank,omitempty"`
-	Time     int64        `msgpack:"time,omitempty" json:"time,omitempty"`
-	Servers  []ServerInfo `msgpack:"servers,omitempty" json:"servers,omitempty"`
+	User        string       `msgpack:"user,omitempty" json:"user,omitempty"`
+	Channel     string       `msgpack:"channel,omitempty" json:"channel,omitempty"`
+	Channels    []string     `msgpack:"channels,omitempty" json:"channels,omitempty"`
+	Text        string       `msgpack:"text,omitempty" json:"text,omitempty"`
+	Status      string       `msgpack:"status,omitempty" json:"status,omitempty"`
+	Code        string       `msgpack:"code,omitempty" json:"code,omitempty"`
+	Message     string       `msgpack:"message,omitempty" json:"message,omitempty"`
+	Name        string       `msgpack:"name,omitempty" json:"name,omitempty"`
+	Rank        int          `msgpack:"rank,omitempty" json:"rank,omitempty"`
+	Time        int64        `msgpack:"time,omitempty" json:"time,omitempty"`
+	Elapsed     int64        `msgpack:"elapsed,omitempty" json:"elapsed,omitempty"`
+	Servers     []ServerInfo `msgpack:"servers,omitempty" json:"servers,omitempty"`
+	Coordinator string       `msgpack:"coordinator,omitempty" json:"coordinator,omitempty"`
 }
 
 type Message struct {
@@ -41,11 +43,12 @@ type Message struct {
 }
 
 type Process struct {
-	Name    string
-	mu      sync.Mutex
-	logical int64
-	skew    int64
-	offset  int64
+	Name      string
+	mu        sync.Mutex
+	logical   int64
+	exchanged int64
+	skew      int64
+	offset    int64
 }
 
 // NewProcess cria o estado de relógios de um processo, com o desvio simulado do relógio físico em milissegundos.
@@ -72,14 +75,29 @@ func (p *Process) Receive(message Message) {
 	if message.Clock > p.logical {
 		p.logical = message.Clock
 	}
+	p.exchanged++
 }
 
-// Adjust ajusta o relógio físico pelo algoritmo de Cristian e devolve o deslocamento e o RTT em ms.
-func (p *Process) Adjust(referenceTime, t0, t1 int64) (offset, rtt int64) {
+// Exchanged devolve quantas mensagens o processo já enviou e recebeu.
+func (p *Process) Exchanged() int64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.exchanged
+}
+
+// Shift soma delta ao deslocamento do relógio físico.
+func (p *Process) Shift(delta int64) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.offset += delta
+}
+
+// Adjust ajusta o relógio físico à hora devolvida pelo coordenador, descontando metade do RTT sem o tempo que ele levou para responder; devolve o deslocamento e o RTT em ms.
+func (p *Process) Adjust(replyTime, elapsed, t0, t1 int64) (offset, rtt int64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	rtt = t1 - t0
-	p.offset = referenceTime + rtt/2 - t1
+	p.offset = replyTime + (rtt-elapsed)/2 - t1
 	return p.offset, rtt
 }
 
@@ -88,6 +106,7 @@ func (p *Process) New(service string, data Data) Message {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.logical++
+	p.exchanged++
 	return Message{
 		Service:   service,
 		Sender:    p.Name,

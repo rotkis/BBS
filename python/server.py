@@ -5,6 +5,7 @@ import zmq
 from pymongo.errors import PyMongoError
 
 import common
+from cluster import Cluster
 from store import Store
 
 MAX_TEXT_LENGTH = 500
@@ -19,12 +20,13 @@ def make_error(code, message):
 
 
 class Server:
-    def __init__(self, node, store, publisher, reference):
+    def __init__(self, node, store, publisher, reference, cluster):
         """Guarda o processo, o banco, o socket PUB e o cliente do serviço de referência e monta a tabela de serviços."""
         self.node = node
         self.store = store
         self.publisher = publisher
         self.reference = reference
+        self.cluster = cluster
         self.rank = None
         self.servers = []
         self.received = 0
@@ -43,14 +45,13 @@ class Server:
                 self.rank = reply["data"]["rank"]
                 break
             time.sleep(RETRY_DELAY_S)
+        self.cluster.rank = self.rank
         print(f"[{self.node.name}] registrado na referência com rank {self.rank}", flush=True)
         self.heartbeat()
 
     def heartbeat(self):
-        """Avisa a referência que o servidor está vivo, corrige o relógio com a hora devolvida e atualiza a lista de servidores."""
-        t0 = self.node.raw_now()
+        """Avisa a referência que o servidor está vivo e atualiza a lista de servidores."""
         reply = self.reference.call("heartbeat", {"name": self.node.name})
-        t1 = self.node.raw_now()
         if reply is None:
             return
         data = reply["data"]
@@ -59,20 +60,19 @@ class Server:
                 self.register()
             return
 
-        offset, rtt = self.node.adjust(data["time"], t0, t1)
-        print(f"[{self.node.name}] relógio sincronizado: offset={offset:+d}ms rtt={rtt}ms", flush=True)
-
         reply = self.reference.call("list", {})
         if reply is not None and reply["data"].get("status") == "ok":
             self.servers = reply["data"].get("servers", [])
+            self.cluster.servers = self.servers
             names = ", ".join(f"{s['name']}(rank {s['rank']})" for s in self.servers)
             print(f"[{self.node.name}] servidores ativos: {names}", flush=True)
 
     def after_request(self):
-        """Conta a requisição de cliente e manda o heartbeat a cada 10 recebidas."""
+        """Conta a requisição de cliente, manda o heartbeat a cada 10 recebidas e acerta o relógio a cada 15 mensagens trocadas."""
         self.received += 1
         if self.received % HEARTBEAT_EVERY == 0:
             self.heartbeat()
+        self.cluster.after_request()
 
     def handle_login(self, request):
         """Registra o login do bot, recusando nomes fora do padrão."""
@@ -110,8 +110,7 @@ class Server:
         self.store.save_publication(
             channel, request["sender"], text, request["timestamp"], message["timestamp"]
         )
-        self.publisher.send_multipart([channel.encode(), common.encode(message)])
-        common.show(self.node.name, "PUB ", message)
+        self.publisher.publish(channel, message)
         return {"status": "ok"}
 
     def process(self, raw):
@@ -145,6 +144,9 @@ def main():
     name = os.environ["SERVER_NAME"]
     broker = os.environ.get("BROKER_ADDR", "tcp://broker:5556")
     proxy = os.environ.get("PROXY_ADDR", "tcp://proxy:5557")
+    sub_addr = os.environ.get("SUB_ADDR", "tcp://proxy:5558")
+    peer_bind = os.environ.get("PEER_BIND", "tcp://*:6000")
+    peer_template = os.environ.get("PEER_ADDR", "tcp://{name}:6000")
     reference_addr = os.environ.get("REFERENCE_ADDR", "tcp://reference:5559")
     skew_ms = int(os.environ.get("CLOCK_SKEW_MS", "0"))
     store = Store(os.environ["MONGO_URI"], "bbs")
@@ -153,10 +155,14 @@ def main():
     reference = common.Requester(node, reference_addr, REFERENCE_TIMEOUT_MS)
 
     context = zmq.Context.instance()
-    publisher = context.socket(zmq.PUB)
-    publisher.connect(proxy)
-    server = Server(node, store, publisher, reference)
+    pub_socket = context.socket(zmq.PUB)
+    pub_socket.connect(proxy)
+    publisher = common.Publisher(pub_socket)
+    cluster = Cluster(node, reference, publisher, peer_template, peer_bind, sub_addr)
+    cluster.start()
+    server = Server(node, store, publisher, reference, cluster)
     server.register()
+    cluster.elect()
 
     socket = context.socket(zmq.REP)
     socket.connect(broker)

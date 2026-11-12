@@ -1,6 +1,6 @@
 # Troca de mensagens com ZeroMQ
 
-Trabalho de Sistemas Distribuídos: um serviço de mensagens parecido com um BBS/IRC em que os usuários são bots. Este README cobre as partes 1, 2 e 3: login, criação e listagem de canais, publicação em canais com Pub/Sub, e relógios (lógico em todas as mensagens e físico nos servidores, com um serviço de referência).
+Trabalho de Sistemas Distribuídos: um serviço de mensagens parecido com um BBS/IRC em que os usuários são bots. Este README cobre as partes 1 a 4: login, criação e listagem de canais, publicação em canais com Pub/Sub, relógios (lógico em todas as mensagens e físico nos servidores), serviço de referência e eleição de um coordenador entre os servidores.
 
 ## Como rodar
 
@@ -62,8 +62,10 @@ Toda mensagem tem cinco campos: `service`, `sender`, `timestamp` (milissegundos 
 | `list` | vazio | `status` e `channels` |
 | `publish` | `channel` e `text` | `status` |
 | `rank` | `name` | `status` e `rank` |
-| `heartbeat` | `name` | `status` e `time` |
+| `heartbeat` | `name` | `status` |
 | `list` (referência) | vazio | `status` e `servers` |
+
+Entre os servidores há ainda `election`, `clock` e `time`, e o anúncio `coordinator` publicado no tópico `servers`.
 
 `status` é `ok` ou `error`. Quando é `error`, a resposta também traz `code` e `message`. Os códigos usados são:
 
@@ -114,19 +116,29 @@ O campo `clock` aparece em todas as linhas de log.
 
 - `rank`: devolve o rank do servidor. O primeiro nome que pede recebe 1, o seguinte 2, e assim por diante. Um nome que já pediu recebe o mesmo rank de novo, então um servidor que reinicia volta com o rank que tinha. Ranks não são reaproveitados.
 - `list`: devolve o nome e o rank dos servidores que estão na lista, em ordem de rank.
-- `heartbeat`: marca o servidor como vivo e devolve a hora da referência no campo `time`. Se o nome nunca pediu rank, a resposta é `unknown_server` e o servidor pede o rank de novo.
+- `heartbeat`: marca o servidor como vivo. Se o nome nunca pediu rank, a resposta é `unknown_server` e o servidor pede o rank de novo.
 
 Um servidor que não manda heartbeat por mais do que `HEARTBEAT_TIMEOUT_S` segundos (30 no compose) sai da lista. Se ele mandar um heartbeat depois disso, volta para a lista com o mesmo rank.
 
-## Heartbeat e sincronização do relógio físico
+## Heartbeat
 
-Ao iniciar, o servidor pede o rank (tentando de novo a cada 2 segundos até a referência responder), manda um heartbeat e passa a mandar um a cada 10 requisições de clientes recebidas. A resposta do heartbeat já traz a hora, então não existe uma requisição separada só para o relógio. Depois de cada heartbeat o servidor também pede a lista de servidores à referência e mostra no log.
+Ao iniciar, o servidor pede o rank (tentando de novo a cada 2 segundos até a referência responder), manda um heartbeat e passa a mandar um a cada 10 requisições de clientes recebidas. A resposta só confirma que ele continua na lista. Depois de cada heartbeat o servidor pede a lista de servidores à referência e mostra no log.
 
-O ajuste usa o algoritmo de Cristian. O servidor anota a hora local antes de mandar o heartbeat (t0) e quando a resposta chega (t1). Com a hora `T` devolvida pela referência, ele estima que a hora certa em t1 é `T + (t1 - t0) / 2` e guarda a diferença para a hora local como um deslocamento. Esse deslocamento é somado ao `timestamp` de todas as mensagens que o servidor envia depois disso. O log mostra a cada ajuste algo como `offset=-3000ms rtt=0ms`. Os bots não sincronizam o relógio, só os servidores.
+## Eleição
 
-Como todos os containers usam o relógio da mesma máquina, os relógios nunca divergem sozinhos. Para dar o que corrigir, o compose define `CLOCK_SKEW_MS` em cada servidor (+3000, -2000, +1500 e -4000), que é somado à hora local do servidor. Com `CLOCK_SKEW_MS` igual a 0 o deslocamento calculado fica perto de zero.
+Cada servidor tem um socket REP na porta 6000, só dentro da rede do compose, para falar com os outros. O endereço de cada um vem do nome dele na rede, por exemplo `tcp://server-go-1:6000`. Uso o algoritmo do valentão, com o rank dado pela referência:
 
-O broker e o proxy não mudaram.
+1. O servidor que inicia, ou que não consegue falar com o coordenador, manda `election` para todos os servidores de rank maior da lista da referência.
+2. Quem responde OK assume a eleição e faz o mesmo com os de rank maior que o dele. O servidor que pediu para de disputar e espera o anúncio.
+3. Se ninguém de rank maior responde, o servidor é o coordenador e publica o próprio nome e rank no tópico `servers`. Todos os servidores assinam o tópico e guardam o nome em uma variável. Quem ouve o anúncio de um servidor de rank menor que o seu começa uma eleição para retomar o posto.
+
+Na subida isso gera uma cascata: cada servidor se elege quando entra e o seguinte, de rank maior, assume, até o último a entrar ficar como coordenador. Quando o coordenador cai, quem notar primeiro (o pedido de relógio dá timeout em 2 segundos) começa a eleição e o servidor vivo de maior rank vira o coordenador.
+
+## Relógio físico com Berkeley
+
+A cada 15 mensagens trocadas (enviadas ou recebidas, de qualquer tipo) o servidor manda `clock` ao coordenador e recebe a hora correta. Para responder, o coordenador faz uma rodada de Berkeley: pergunta a hora (`time`) dos outros servidores ativos, desconta metade do RTT de cada resposta, tira a média das diferenças incluindo a dele e ajusta o próprio relógio para essa média. Depois devolve a hora já ajustada, junto com o tempo que levou para responder. O servidor que pediu desconta esse tempo e metade do resto do RTT e guarda a diferença como deslocamento, que é somado ao `timestamp` das mensagens dele. O coordenador também faz uma rodada ao se eleger e outra a cada 15 mensagens dele. Servidores que não respondem a `time` são pulados por 10 segundos.
+
+Como o Berkeley usa a média dos relógios, os servidores se acertam entre si, mas não com a hora real. Com os desvios simulados do compose (`CLOCK_SKEW_MS`) eles convergem para a média deles e ficam a poucos milissegundos uns dos outros. Os bots não sincronizam o relógio.
 
 ## O que ainda não está resolvido
 

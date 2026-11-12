@@ -27,7 +27,8 @@ const (
 type server struct {
 	process   *proto.Process
 	store     store.Store
-	publisher *zmq.Socket
+	publisher *req.Publisher
+	cluster   *cluster
 	reference *req.Requester
 	rank      int
 	servers   []proto.ServerInfo
@@ -57,15 +58,16 @@ func (s *server) register() {
 		}
 		time.Sleep(retryDelay)
 	}
+	s.cluster.mu.Lock()
+	s.cluster.rank = s.rank
+	s.cluster.mu.Unlock()
 	fmt.Printf("[%s] registrado na referência com rank %d\n", s.process.Name, s.rank)
 	s.heartbeat()
 }
 
 // heartbeat avisa a referência que o servidor está vivo, corrige o relógio com a hora devolvida e atualiza a lista de servidores.
 func (s *server) heartbeat() {
-	t0 := s.process.RawNow()
 	reply, ok := s.reference.Call("heartbeat", proto.Data{Name: s.process.Name})
-	t1 := s.process.RawNow()
 	if !ok {
 		return
 	}
@@ -76,12 +78,12 @@ func (s *server) heartbeat() {
 		return
 	}
 
-	offset, rtt := s.process.Adjust(reply.Data.Time, t0, t1)
-	fmt.Printf("[%s] relógio sincronizado: offset=%+dms rtt=%dms\n", s.process.Name, offset, rtt)
-
 	reply, ok = s.reference.Call("list", proto.Data{})
 	if ok && reply.Data.Status == "ok" {
 		s.servers = reply.Data.Servers
+		s.cluster.mu.Lock()
+		s.cluster.servers = s.servers
+		s.cluster.mu.Unlock()
 		names := make([]string, 0, len(s.servers))
 		for _, info := range s.servers {
 			names = append(names, info.Name+"(rank "+strconv.Itoa(info.Rank)+")")
@@ -90,12 +92,13 @@ func (s *server) heartbeat() {
 	}
 }
 
-// afterRequest conta a requisição de cliente e manda o heartbeat a cada 10 recebidas.
+// afterRequest conta a requisição de cliente, manda o heartbeat a cada 10 recebidas e acerta o relógio a cada 15 mensagens trocadas.
 func (s *server) afterRequest() {
 	s.received++
 	if s.received%heartbeatEvery == 0 {
 		s.heartbeat()
 	}
+	s.cluster.afterRequest()
 }
 
 // handleLogin registra o login do bot, recusando nomes fora do padrão.
@@ -147,17 +150,12 @@ func (s *server) handlePublish(ctx context.Context, request proto.Message) (prot
 	}
 
 	message := s.process.New("publish", proto.Data{Channel: channel, User: request.Sender, Text: text})
-	raw, err := proto.Encode(message)
-	if err != nil {
-		return proto.Data{}, err
-	}
 	if err := s.store.SavePublication(ctx, channel, request.Sender, text, request.Timestamp, message.Timestamp); err != nil {
 		return proto.Data{}, err
 	}
-	if _, err := s.publisher.SendMessage(channel, raw); err != nil {
+	if err := s.publisher.Publish(channel, message); err != nil {
 		return proto.Data{}, err
 	}
-	proto.Show(s.process.Name, "PUB ", message)
 	return proto.Data{Status: "ok"}, nil
 }
 
@@ -224,15 +222,28 @@ func main() {
 	process := proto.NewProcess(name, skew)
 	reference := req.New(process, env("REFERENCE_ADDR", "tcp://reference:5559"), referenceTimeout)
 
-	publisher, err := zmq.NewSocket(zmq.PUB)
+	pubSocket, err := zmq.NewSocket(zmq.PUB)
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := publisher.Connect(proxy); err != nil {
+	if err := pubSocket.Connect(proxy); err != nil {
 		log.Fatal(err)
 	}
-	s := &server{process: process, store: st, publisher: publisher, reference: reference}
+	publisher := req.NewPublisher(process, pubSocket)
+	c := &cluster{
+		process:      process,
+		reference:    reference,
+		publisher:    publisher,
+		peerTemplate: env("PEER_ADDR", "tcp://%s:6000"),
+		peerBind:     env("PEER_BIND", "tcp://*:6000"),
+		subAddr:      env("SUB_ADDR", "tcp://proxy:5558"),
+		nextSync:     syncEvery,
+		downUntil:    map[string]time.Time{},
+	}
+	c.start()
+	s := &server{process: process, store: st, publisher: publisher, cluster: c, reference: reference}
 	s.register()
+	c.elect()
 
 	socket, err := zmq.NewSocket(zmq.REP)
 	if err != nil {

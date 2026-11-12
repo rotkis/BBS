@@ -50,7 +50,7 @@ func (r *reference) handleRank(request proto.Message) proto.Data {
 	return proto.Data{Status: "ok", Rank: rank}
 }
 
-// handleHeartbeat renova a presença do servidor e devolve a hora da referência para ele acertar o relógio.
+// handleHeartbeat renova a presença do servidor na lista.
 func (r *reference) handleHeartbeat(request proto.Message) proto.Data {
 	name := request.Data.Name
 	if _, known := r.ranks[name]; !known {
@@ -60,7 +60,7 @@ func (r *reference) handleHeartbeat(request proto.Message) proto.Data {
 		fmt.Printf("%s [%s] servidor %s voltou à lista\n", time.Now().Format("15:04:05.000"), r.process.Name, name)
 	}
 	r.lastSeen[name] = time.Now()
-	return proto.Data{Status: "ok", Time: r.process.Now()}
+	return proto.Data{Status: "ok"}
 }
 
 // handleList devolve o nome e o rank dos servidores ativos, em ordem de rank.
