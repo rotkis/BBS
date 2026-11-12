@@ -17,6 +17,10 @@ SERVERS_MAX_AGE_S = 5
 PEER_WORKERS = 8
 SERVERS_TOPIC = "servers"
 DOWN_SECONDS = 10
+# Janela de aceitação do Berkeley: respostas mais lentas que isso ou relógios
+# que diferem mais que isso ficam fora da média da rodada.
+BERKELEY_MAX_RTT_MS = 100
+BERKELEY_MAX_DIFF_MS = 1000
 
 
 def make_error(code, message):
@@ -109,7 +113,7 @@ class Cluster:
         self.berkeley_round()
 
     def berkeley_round(self):
-        """Berkeley: pergunta a hora dos outros servidores, calcula a média com a sua e ajusta o próprio relógio para ela."""
+        """Berkeley: pergunta a hora dos outros servidores, descarta os que responderam devagar ou que estão fora da janela de aceitação e ajusta o próprio relógio para a média dos que sobraram."""
         diffs = [0]
         for server in self.fetch_servers():
             name = server["name"]
@@ -121,8 +125,15 @@ class Cluster:
             if reply is None or reply["data"].get("status") != "ok":
                 self.down_until[name] = time.time() + DOWN_SECONDS
                 continue
-            peer_time = reply["data"]["time"] + (t1 - t0) // 2
-            diffs.append(peer_time - t1)
+            rtt = t1 - t0
+            diff = reply["data"]["time"] + rtt // 2 - t1
+            if rtt > BERKELEY_MAX_RTT_MS:
+                print(f"[{self.node.name}] Berkeley: {name} respondeu em {rtt}ms, fora da média", flush=True)
+                continue
+            if abs(diff) > BERKELEY_MAX_DIFF_MS:
+                print(f"[{self.node.name}] Berkeley: {name} difere {diff:+d}ms, fora da média", flush=True)
+                continue
+            diffs.append(diff)
         average = round(sum(diffs) / len(diffs))
         self.node.shift(average)
         print(

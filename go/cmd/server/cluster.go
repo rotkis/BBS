@@ -21,6 +21,11 @@ const (
 	serversTopic    = "servers"
 	downFor         = 10 * time.Second
 	peerWorkers     = 8
+
+	// Janela de aceitação do Berkeley: respostas mais lentas que isso ou relógios
+	// que diferem mais que isso ficam fora da média da rodada.
+	berkeleyMaxRttMs  int64 = 100
+	berkeleyMaxDiffMs int64 = 1000
 )
 
 type cluster struct {
@@ -151,7 +156,8 @@ func (c *cluster) markDown(name string) {
 	c.downUntil[name] = time.Now().Add(downFor)
 }
 
-// berkeleyRound pergunta a hora dos outros servidores, calcula a média com a sua e ajusta o próprio relógio para ela.
+// berkeleyRound pergunta a hora dos outros servidores, descarta os que responderam devagar
+// ou que estão fora da janela de aceitação e ajusta o próprio relógio para a média dos que sobraram.
 func (c *cluster) berkeleyRound() {
 	diffs := []int64{0}
 	for _, server := range c.fetchServers() {
@@ -165,7 +171,17 @@ func (c *cluster) berkeleyRound() {
 			c.markDown(server.Name)
 			continue
 		}
-		diffs = append(diffs, reply.Data.Time+(t1-t0)/2-t1)
+		rtt := t1 - t0
+		diff := reply.Data.Time + rtt/2 - t1
+		if rtt > berkeleyMaxRttMs {
+			fmt.Printf("[%s] Berkeley: %s respondeu em %dms, fora da média\n", c.process.Name, server.Name, rtt)
+			continue
+		}
+		if diff > berkeleyMaxDiffMs || diff < -berkeleyMaxDiffMs {
+			fmt.Printf("[%s] Berkeley: %s difere %+dms, fora da média\n", c.process.Name, server.Name, diff)
+			continue
+		}
+		diffs = append(diffs, diff)
 	}
 	var sum int64
 	for _, diff := range diffs {

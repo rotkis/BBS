@@ -146,7 +146,9 @@ Na subida isso gera uma cascata: cada servidor se elege quando entra e o seguint
 
 A cada 15 mensagens trocadas (enviadas ou recebidas, de qualquer tipo) o servidor manda `clock` ao coordenador e recebe a hora correta. Para responder, o coordenador faz uma rodada de Berkeley: pergunta a hora (`time`) dos outros servidores ativos, desconta metade do RTT de cada resposta, tira a média das diferenças incluindo a dele e ajusta o próprio relógio para essa média. Depois devolve a hora já ajustada, junto com o tempo que levou para responder. O servidor que pediu desconta esse tempo e metade do resto do RTT e guarda a diferença como deslocamento, que é somado ao `timestamp` das mensagens dele. O coordenador também faz uma rodada ao se eleger e outra a cada 15 mensagens dele. Servidores que não respondem a `time` são pulados por 10 segundos.
 
-Como o Berkeley usa a média dos relógios, os servidores se acertam entre si, mas não com a hora real. Com os desvios simulados do compose (`CLOCK_SKEW_MS`) eles convergem para a média deles e ficam a poucos milissegundos uns dos outros. Os bots não sincronizam o relógio.
+A latência também define a janela de aceitação da rodada: quem responde com RTT acima de `BERKELEY_MAX_RTT_MS` (100 ms) ou cuja hora difere da do coordenador em mais de `BERKELEY_MAX_DIFF_MS` (1000 ms) fica fora da média e aparece no log como `fora da média`. Esses servidores não são marcados como fora do ar: só não entram naquela rodada e podem voltar na seguinte.
+
+Como o Berkeley usa a média dos relógios aceitos na rodada, os servidores se acertam entre si, mas não com a hora real. Com os desvios simulados do compose (`CLOCK_SKEW_MS`) eles ficam a poucos milissegundos uns dos outros; o valor absoluto do grupo depende de quais relógios entraram nas rodadas da eleição, porque a janela descarta os que estavam muito longe. Se o próprio coordenador estiver fora do intervalo, ele descarta os outros e o grupo é puxado para o relógio dele. Os bots não sincronizam o relógio.
 
 ## Replicação
 
@@ -163,7 +165,7 @@ Como funciona:
 
 Servidor que entra ou volta: ao saber quem é o coordenador, ele pede com `catchup` tudo o que tem número maior que o último dele, em lotes de 200 (é o pull da aula). Um servidor que sobe com o banco vazio fica igual aos outros assim. Um coordenador recém-eleito faz o mesmo com todos os outros servidores antes de assumir, para não numerar operações em cima de um log incompleto.
 
-Consistência: como só o coordenador numera e todos aplicam na ordem dos números, todos os servidores veem as escritas na mesma ordem, o que dá consistência sequencial. Servidores que não respondem dentro de 1 segundo são pulados por 10 segundos e se recuperam pelo `gap` ou pelo `catchup`, então eles ficam atrasados por um tempo e depois alcançam os outros.
+Consistência: como só o coordenador numera e todos aplicam na ordem dos números, as escritas têm uma ordem global única, o que dá consistência sequencial para as escritas. As leituras (`list` e `history`) são respondidas pelo servidor que o round-robin escolher, com o que ele tem no próprio banco, então um servidor que ficou fora do ar devolve dados antigos até o `catchup` alcançar os outros: para esses servidores a consistência é eventual, e leitura monotônica não é garantida (um bot pode ler algo mais novo em um servidor e depois algo mais antigo em outro). Servidores que não respondem dentro de 1 segundo são pulados por 10 segundos e se recuperam pelo `gap` ou pelo `catchup`, então eles ficam atrasados por um tempo e depois alcançam os outros.
 
 Mudanças em relação ao método da aula:
 
@@ -180,6 +182,8 @@ Durante a eleição, ou logo depois de o coordenador cair, as escritas voltam co
 Se o coordenador numerar uma operação e cair antes de enviá-la a todos, essa operação pode existir só em alguns servidores. O bot não recebeu `ok` nesse caso, e o novo coordenador junta o que os outros têm antes de assumir, mas se dois servidores se acharem coordenadores ao mesmo tempo, por exemplo no começo da eleição em cascata, eles podem numerar operações diferentes com o mesmo número e uma delas é descartada em quem já tinha aplicado a outra. Não tratei esse caso.
 
 O Pub/Sub não guarda nem reentrega nada. Um bot só recebe o que for publicado depois de ele assinar o canal, e um bot que entra depois não vê o que já foi publicado, mas pode pedir o histórico com `history`.
+
+Leituras não são monotônicas. `list` e `history` são respondidos pelo servidor sorteado pelo round-robin, e um servidor que estava fora do ar responde com dados antigos até terminar o `catchup`. Assim, o mesmo bot pode ler uma lista ou um histórico mais novo em um servidor e, na requisição seguinte, algo mais antigo em outro. As escritas estão em ordem global única, mas a leitura em servidor atrasado é eventual.
 
 O heartbeat é por número de requisições, não por tempo. Se nenhum bot estiver mandando requisições, os servidores não mandam heartbeat e a referência os tira da lista depois do timeout. Com os 4 bots do compose cada servidor recebe uma requisição por segundo ou mais e o timeout de 30 segundos não é atingido.
 
