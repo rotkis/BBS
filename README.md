@@ -205,17 +205,3 @@ Mudanças em relação ao método da aula:
 - O push sozinho não cobre servidor que estava fora do ar, então acrescentei o `catchup` por pull.
 
 O coordenador aplica uma operação por vez, com um lock. Cada servidor atende os pedidos dos outros em 8 threads (goroutines no Go) atrás de um ROUTER, porque o `forward` fica esperando a replicação terminar e travaria os outros pedidos se houvesse uma thread só.
-
-## O que ainda não está resolvido
-
-Durante a eleição, ou logo depois de o coordenador cair, as escritas voltam com `no_coordinator` ou `coordinator_unavailable` até o novo coordenador ser anunciado. O bot só tenta de novo na rodada seguinte.
-
-Se o coordenador numerar uma operação e cair antes de enviá-la a todos, essa operação pode existir só em alguns servidores. O bot não recebeu `ok` nesse caso, e o novo coordenador junta o que os outros têm antes de assumir, mas se dois servidores se acharem coordenadores ao mesmo tempo, por exemplo no começo da eleição em cascata, eles podem numerar operações diferentes com o mesmo número e uma delas é descartada em quem já tinha aplicado a outra. Não tratei esse caso.
-
-O Pub/Sub não guarda nem reentrega nada. Um bot só recebe o que for publicado depois de ele assinar o canal, e um bot que entra depois não vê o que já foi publicado, mas pode pedir o histórico com `history`.
-
-Leituras não são monotônicas. `list` e `history` são respondidos pelo servidor sorteado pelo round-robin, e um servidor que estava fora do ar responde com dados antigos até terminar o `catchup`. Assim, o mesmo bot pode ler uma lista ou um histórico mais novo em um servidor e, na requisição seguinte, algo mais antigo em outro. As escritas estão em ordem global única, mas a leitura em servidor atrasado é eventual.
-
-O heartbeat é por número de requisições, não por tempo. Se nenhum bot estiver mandando requisições, os servidores não mandam heartbeat e a referência os tira da lista depois do timeout. Com os 4 bots do compose cada servidor recebe uma requisição por segundo ou mais e o timeout de 30 segundos não é atingido.
-
-A referência guarda ranks e a lista só em memória. Se ela reiniciar, cada servidor recebe `unknown_server` no próximo heartbeat e pede o rank de novo, mas os ranks são atribuídos outra vez na ordem em que os servidores aparecerem.
