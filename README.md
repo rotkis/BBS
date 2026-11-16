@@ -23,24 +23,24 @@ As publicações aparecem nos servidores como `PUB` e nos bots inscritos como `R
 03:29:06.560 [bot-py-1] RECV publish  channel=music user=bot-go-1 text="bom dia [2/10]" sent_at=1794281346560 received_at=1794281346560
 ```
 
-Para ver só um serviço: `docker compose logs -f server-py-1`. Para zerar os dados, `docker compose down -v`. Quem rodou uma versão anterior do projeto precisa fazer isso antes, porque o formato dos dados gravados mudou na parte 5.
+Para ver só um serviço: `docker compose logs -f server-py-1`. Para zerar os dados, `docker compose down -v`. Quem rodou uma versão anterior do projeto precisa fazer isso antes, porque o formato dos dados gravados mudou na parte 5. Se você já rodou o projeto e os containers antigos ainda existem, rode `docker compose down` antes de subir de novo, senão o `up` falha com conflito de nome de container ou de rede.
 
 ## Parar o coordenador
 
-Para mostrar a eleição, primeiro descubra quem é o coordenador atual, que é o último servidor que apareceu como eleito:
+Para mostrar a eleição, primeiro descubra quem é o coordenador atual. Ele é o servidor que aparece nas rodadas de Berkeley (só o coordenador faz a rodada) e também o último eleito:
 
 ```
-docker compose logs --no-log-prefix 2>&1 | grep "eleito coordenador" | tail -1
+docker compose logs --tail 500 server-py-1 server-py-2 server-go-1 server-go-2 2>&1 | grep -E "Berkeley: média|eleito coordenador" | tail -1 | sed -E 's/.*\[(server-[^]]+)\].*/\1/'
 ```
 
-A saída mostra o nome, por exemplo `[server-go-2] eleito coordenador (rank 4)`. Deixe os logs dos servidores abertos em outro terminal e pare esse container:
+A saída é só o nome, por exemplo `server-py-2`. Deixe os logs dos servidores abertos em outro terminal e pare esse container:
 
 ```
 docker compose logs -f server-py-1 server-py-2 server-go-1 server-go-2
-docker compose stop server-go-2
+docker compose stop server-py-2
 ```
 
-Os outros servidores notam a falta do coordenador no pedido de relógio e começam a eleição. Os logs mostram `[server-py-1] coordenador server-go-2 indisponível, pedindo eleição` e depois `[server-go-1] eleito coordenador (rank 3)`. As escritas que chegam durante a eleição voltam com `no_coordinator` ou `coordinator_unavailable`, e os bots tentam de novo na rodada seguinte. Para religar o servidor parado, use `docker compose start server-go-2`: ele volta e pede `catchup` do que perdeu.
+Os outros servidores notam a falta do coordenador no pedido de relógio e começam a eleição. Os logs mostram `[server-go-2] coordenador server-py-2 indisponível, pedindo eleição` e depois `[server-py-1] eleito coordenador (rank 3)`, que é o servidor vivo de maior rank. As escritas que chegam durante a eleição voltam com `no_coordinator` ou `coordinator_unavailable`, e os bots tentam de novo na rodada seguinte. Para religar o servidor parado, use `docker compose start server-py-2`: ele volta e pede `catchup` do que perdeu.
 
 ## Estrutura
 
