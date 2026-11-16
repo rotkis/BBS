@@ -54,6 +54,20 @@ Persistência: MongoDB, uma instância por servidor, cada uma com o seu volume, 
 
 Nas três últimas o `_id` é o número da operação no `oplog`. Assim aplicar de novo uma operação que já estava gravada não duplica nada.
 
+Para ver as coleções do banco de um servidor, sem precisar entrar no shell:
+
+```
+docker exec mongo-server-py-1 mongosh bbs --quiet --eval 'db.getCollectionNames()'
+```
+
+Para contar os documentos de uma coleção, troque o `--eval` por `db.publications.countDocuments()`. E para ver os últimos documentos gravados:
+
+```
+docker exec mongo-server-py-1 mongosh bbs --quiet --eval 'db.publications.find().sort({_id:-1}).limit(5)'
+```
+
+Troque `mongo-server-py-1` por `mongo-server-py-2`, `mongo-server-go-1` ou `mongo-server-go-2` para ver o outro servidor. Para ficar no shell interativo, tire o `--eval` (e aqui use `-it`): `docker exec -it mongo-server-py-1 mongosh bbs`. Os containers do MongoDB não expõem porta para o host, então o acesso é sempre por dentro do container.
+
 ## Mensagens
 
 Toda mensagem tem cinco campos: `service`, `sender`, `timestamp` (milissegundos desde a época Unix), `clock` (o contador do relógio lógico de quem envia) e `data`.
