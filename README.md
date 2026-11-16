@@ -25,6 +25,23 @@ As publicações aparecem nos servidores como `PUB` e nos bots inscritos como `R
 
 Para ver só um serviço: `docker compose logs -f server-py-1`. Para zerar os dados, `docker compose down -v`. Quem rodou uma versão anterior do projeto precisa fazer isso antes, porque o formato dos dados gravados mudou na parte 5.
 
+## Parar o coordenador
+
+Para mostrar a eleição, primeiro descubra quem é o coordenador atual, que é o último servidor que apareceu como eleito:
+
+```
+docker compose logs --no-log-prefix 2>&1 | grep "eleito coordenador" | tail -1
+```
+
+A saída mostra o nome, por exemplo `[server-go-2] eleito coordenador (rank 4)`. Deixe os logs dos servidores abertos em outro terminal e pare esse container:
+
+```
+docker compose logs -f server-py-1 server-py-2 server-go-1 server-go-2
+docker compose stop server-go-2
+```
+
+Os outros servidores notam a falta do coordenador no pedido de relógio e começam a eleição. Os logs mostram `[server-py-1] coordenador server-go-2 indisponível, pedindo eleição` e depois `[server-go-1] eleito coordenador (rank 3)`. As escritas que chegam durante a eleição voltam com `no_coordinator` ou `coordinator_unavailable`, e os bots tentam de novo na rodada seguinte. Para religar o servidor parado, use `docker compose start server-go-2`: ele volta e pede `catchup` do que perdeu.
+
 ## Estrutura
 
 ```
